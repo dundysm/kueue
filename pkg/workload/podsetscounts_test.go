@@ -439,7 +439,7 @@ func TestApplyPodSetCounts(t *testing.T) {
 				PodSets(kueue.PodSet{Name: "workers", Count: 1, MinCount: new(int32(1))}).
 				Obj(),
 		},
-		"keep minimum of a pending initial workload": {
+		"lower minimum of a pending initial workload with its count": {
 			args: args{
 				wl: pendingElasticWorkload.Clone().
 					PodSets(kueue.PodSet{Name: "workers", Count: 4, MinCount: new(int32(4))}).
@@ -448,7 +448,68 @@ func TestApplyPodSetCounts(t *testing.T) {
 			},
 			partialScaleUp: true,
 			want: pendingElasticWorkload.Clone().
-				PodSets(kueue.PodSet{Name: "workers", Count: 1, MinCount: new(int32(4))}).
+				PodSets(kueue.PodSet{Name: "workers", Count: 1, MinCount: new(int32(1))}).
+				Obj(),
+		},
+		"raise minimum of a pending initial workload with its count": {
+			args: args{
+				wl: pendingElasticWorkload.Clone().
+					PodSets(kueue.PodSet{Name: "workers", Count: 3, MinCount: new(int32(3))}).
+					Obj(),
+				counts: PodSetsCounts{"workers": 5},
+			},
+			partialScaleUp: true,
+			want: pendingElasticWorkload.Clone().
+				PodSets(kueue.PodSet{Name: "workers", Count: 5, MinCount: new(int32(5))}).
+				Obj(),
+		},
+		"keep a lowered minimum of a pending initial workload on scale-up": {
+			args: args{
+				wl: pendingElasticWorkload.Clone().
+					PodSets(kueue.PodSet{Name: "workers", Count: 4, MinCount: new(int32(1))}).
+					Obj(),
+				counts: PodSetsCounts{"workers": 6},
+			},
+			partialScaleUp: true,
+			want: pendingElasticWorkload.Clone().
+				PodSets(kueue.PodSet{Name: "workers", Count: 6, MinCount: new(int32(1))}).
+				Obj(),
+		},
+		"cap a lowered minimum of a pending initial workload on scale-down": {
+			args: args{
+				wl: pendingElasticWorkload.Clone().
+					PodSets(kueue.PodSet{Name: "workers", Count: 6, MinCount: new(int32(3))}).
+					Obj(),
+				counts: PodSetsCounts{"workers": 2},
+			},
+			partialScaleUp: true,
+			want: pendingElasticWorkload.Clone().
+				PodSets(kueue.PodSet{Name: "workers", Count: 2, MinCount: new(int32(2))}).
+				Obj(),
+		},
+		"keep minimum of a pending initial workload with partial scale-up disabled": {
+			args: args{
+				wl: pendingElasticWorkload.Clone().
+					PodSets(kueue.PodSet{Name: "workers", Count: 3, MinCount: new(int32(3))}).
+					Obj(),
+				counts: PodSetsCounts{"workers": 5},
+			},
+			want: pendingElasticWorkload.Clone().
+				PodSets(kueue.PodSet{Name: "workers", Count: 5, MinCount: new(int32(3))}).
+				Obj(),
+		},
+		"keep minimum of a pending scale-up slice on scale-up": {
+			args: args{
+				wl: pendingElasticWorkload.Clone().
+					Annotation(constants.WorkloadSliceReplacementForAnnotation, "test/old-slice").
+					PodSets(kueue.PodSet{Name: "workers", Count: 4, MinCount: new(int32(4))}).
+					Obj(),
+				counts: PodSetsCounts{"workers": 6},
+			},
+			partialScaleUp: true,
+			want: pendingElasticWorkload.Clone().
+				Annotation(constants.WorkloadSliceReplacementForAnnotation, "test/old-slice").
+				PodSets(kueue.PodSet{Name: "workers", Count: 6, MinCount: new(int32(4))}).
 				Obj(),
 		},
 	}

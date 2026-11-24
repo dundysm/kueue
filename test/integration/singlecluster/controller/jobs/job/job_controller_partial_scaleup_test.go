@@ -190,6 +190,91 @@ var _ = ginkgo.Describe("Job with partial replica scale-up for elastic jobs", gi
 		behavioral.ExpectWorkloadToFinish(ctx, k8sClient, client.ObjectKeyFromObject(partialSlice))
 	})
 
+	ginkgo.It("Should lower the minimum of a pending initial workload when the Job scales down below it", func() {
+		testJob := testingjob.MakeJob("foo", ns.Name).
+			SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+			SetAnnotation(constants.ElasticJobScaleUpStrategyAnnotationKey, constants.ElasticJobScaleUpStrategyPartial).
+			Indexed(true).
+			Queue(kueue.LocalQueueName(localQueue.Name)).
+			Request(corev1.ResourceCPU, "1").
+			Parallelism(8).
+			Completions(8).
+			Obj()
+
+		ginkgo.By("creating the job with 8 replicas, more than the 7-pod quota")
+		behavioral.MustCreate(ctx, k8sClient, testJob)
+		wl := &behavioral.ExpectWorkloadsInNamespace(ctx, k8sClient, ns.Name, 1)[0]
+		gomega.Expect(wl.Spec.PodSets[0].MinCount).Should(gomega.Equal(new(int32(8))))
+		behavioral.ExpectWorkloadsToBePending(ctx, k8sClient, wl)
+
+		ginkgo.By("scaling the pending job down to 2 replicas")
+		scaleJob(testJob, 2)
+
+		ginkgo.By("the initial workload follows the job down and is admitted")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), wl)).Should(gomega.Succeed())
+			g.Expect(wl.Spec.PodSets[0].Count).Should(gomega.Equal(int32(2)))
+			g.Expect(wl.Spec.PodSets[0].MinCount).Should(gomega.Equal(new(int32(2))))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+		behavioral.ExpectPodSetAdmittedCount(ctx, k8sClient, wl, kueue.DefaultPodSetName, 2)
+		behavioral.ExpectJobUnsuspended(ctx, k8sClient, client.ObjectKeyFromObject(testJob))
+	})
+
+	ginkgo.It("Should keep the first admission all-or-nothing when a pending Job scales up", func() {
+		ginkgo.By("lowering the ClusterQueue's CPU quota from 7 to 2")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(clusterQueue), clusterQueue)).Should(gomega.Succeed())
+			behavioral.SetResourceNominalQuota(clusterQueue, corev1.ResourceCPU, "2")
+			g.Expect(k8sClient.Update(ctx, clusterQueue)).Should(gomega.Succeed())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		testJob := testingjob.MakeJob("foo", ns.Name).
+			SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).
+			SetAnnotation(constants.ElasticJobScaleUpStrategyAnnotationKey, constants.ElasticJobScaleUpStrategyPartial).
+			Indexed(true).
+			Queue(kueue.LocalQueueName(localQueue.Name)).
+			Request(corev1.ResourceCPU, "1").
+			Parallelism(3).
+			Completions(3).
+			Obj()
+
+		ginkgo.By("creating the job with 3 replicas, more than the 2-pod quota")
+		behavioral.MustCreate(ctx, k8sClient, testJob)
+		wl := &behavioral.ExpectWorkloadsInNamespace(ctx, k8sClient, ns.Name, 1)[0]
+		behavioral.ExpectWorkloadsToBePending(ctx, k8sClient, wl)
+
+		ginkgo.By("scaling the pending job up to 5 replicas")
+		scaleJob(testJob, 5)
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), wl)).Should(gomega.Succeed())
+			g.Expect(wl.Spec.PodSets[0].Count).Should(gomega.Equal(int32(5)))
+			g.Expect(wl.Spec.PodSets[0].MinCount).Should(gomega.Equal(new(int32(5))))
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("raising the ClusterQueue's CPU quota to 4, which fits the old target but not the new one")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(clusterQueue), clusterQueue)).Should(gomega.Succeed())
+			behavioral.SetResourceNominalQuota(clusterQueue, corev1.ResourceCPU, "4")
+			g.Expect(k8sClient.Update(ctx, clusterQueue)).Should(gomega.Succeed())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("the initial workload is not admitted partially")
+		gomega.Consistently(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(wl), wl)).Should(gomega.Succeed())
+			g.Expect(wl.Status.Admission).Should(gomega.BeNil())
+		}, behavioral.LongConsistentDuration, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("raising the ClusterQueue's CPU quota to 5")
+		gomega.Eventually(func(g gomega.Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(clusterQueue), clusterQueue)).Should(gomega.Succeed())
+			behavioral.SetResourceNominalQuota(clusterQueue, corev1.ResourceCPU, "5")
+			g.Expect(k8sClient.Update(ctx, clusterQueue)).Should(gomega.Succeed())
+		}, behavioral.Timeout, behavioral.Interval).Should(gomega.Succeed())
+
+		ginkgo.By("the initial workload is admitted with all 5 replicas")
+		behavioral.ExpectPodSetAdmittedCount(ctx, k8sClient, wl, kueue.DefaultPodSetName, 5)
+	})
+
 	ginkgo.DescribeTable("Should partially admit a scale-up of parallelism alone, below completions, when quota is insufficient", func(indexed bool) {
 		testJob := testingjob.MakeJob("baz", ns.Name).
 			SetAnnotation(workloadslicing.EnabledAnnotationKey, workloadslicing.EnabledAnnotationValue).

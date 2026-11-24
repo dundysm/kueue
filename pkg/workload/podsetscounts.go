@@ -115,9 +115,25 @@ func CanReduceMinCountOnScaleDown(wl *kueue.Workload) bool {
 		(IsAdmitted(wl) || wl.Annotations[constants.WorkloadSliceReplacementForAnnotation] != "")
 }
 
+// keepsInitialAdmissionFloor reports whether an elastic Workload is the initial
+// slice of a partial scale-up job that has not reserved quota yet. Its PodSet
+// minimums are the all-or-nothing floor of the first admission, so they follow
+// the target count while the Workload waits.
+func keepsInitialAdmissionFloor(wl *kueue.Workload) bool {
+	return features.Enabled(features.ElasticJobsViaWorkloadSlicesWithPartialReplicaScaleUp) &&
+		IsElasticWorkload(wl) &&
+		!HasQuotaReservation(wl) &&
+		wl.Annotations[constants.WorkloadSliceReplacementForAnnotation] == ""
+}
+
 // ApplyPodSetCounts updates a Workload's PodSet counts. For elastic Workloads
 // that CanReduceMinCountOnScaleDown, a scale-down below a PodSet's minCount
 // also lowers that minCount to the new count.
+//
+// For the initial slice of a partial scale-up job that has not reserved quota
+// yet, a minCount equal to the old count moves with the count in both
+// directions, so the first admission stays all-or-nothing for the new target,
+// and a minCount above the new count is lowered to it, so the update stays valid.
 //
 // This function only updates existing PodSets within the Workload. It ignores:
 //   - PodSet names present in the counts map but not found in the Workload.
@@ -127,11 +143,17 @@ func CanReduceMinCountOnScaleDown(wl *kueue.Workload) bool {
 // and calling it with a nil Workload will result in a panic.
 func ApplyPodSetCounts(wl *kueue.Workload, counts PodSetsCounts) {
 	canReduceMinCount := CanReduceMinCountOnScaleDown(wl)
+	keepInitialFloor := keepsInitialAdmissionFloor(wl)
 	for i := range wl.Spec.PodSets {
 		ps := &wl.Spec.PodSets[i]
 		if count, found := counts[ps.Name]; found {
-			if canReduceMinCount && count < ps.Count && ps.MinCount != nil && *ps.MinCount > count {
-				ps.MinCount = new(count)
+			if ps.MinCount != nil {
+				switch {
+				case keepInitialFloor && (*ps.MinCount == ps.Count || *ps.MinCount > count):
+					ps.MinCount = new(count)
+				case canReduceMinCount && count < ps.Count && *ps.MinCount > count:
+					ps.MinCount = new(count)
+				}
 			}
 			ps.Count = count
 		}
